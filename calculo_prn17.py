@@ -1,5 +1,6 @@
 import math
 import csv
+import re
 from pathlib import Path
 
 
@@ -24,7 +25,6 @@ OUTPUT_CSV = "PRN17_resultados.csv"
 
 MU = 3.986005e14               # m^3/s^2
 OMEGA_E = 7.2921151467e-5      # rad/s
-PI = math.pi
 
 # WGS84 para conversión ECEF -> geodéticas
 WGS84_A = 6378137.0
@@ -41,29 +41,29 @@ def rinex_float(value: str) -> float:
     Convierte números en formato RINEX.
     RINEX puede usar D en vez de E para exponentes.
     """
-    value = value.replace("D", "E").replace("d", "E").strip()
-    return float(value)
+    return float(value.replace("D", "E").replace("d", "E").strip())
 
 
 def split_rinex_values(line: str):
     """
     Extrae valores numéricos de una línea RINEX de navegación.
-    En RINEX 3 los números suelen ocupar campos de 19 caracteres.
+    Versión robusta usando expresión regular.
+
+    Detecta números tipo:
+    1.234D-04
+    -2.345E+03
+    1234
+    -1234
     """
-    values = []
-    for i in range(0, len(line), 19):
-        chunk = line[i:i + 19].strip()
-        if chunk:
-            try:
-                values.append(rinex_float(chunk))
-            except ValueError:
-                pass
-    return values
+    pattern = r"[-+]?\d+\.\d+(?:[DEde][-+]?\d+)?|[-+]?\d+(?:[DEde][-+]?\d+)?"
+    matches = re.findall(pattern, line)
+
+    return [rinex_float(value) for value in matches]
 
 
 def normalize_time(tk: float) -> float:
     """
-    Ajusta tk al rango recomendado por GPS:
+    Ajusta tk al rango recomendado:
     -302400 <= tk <= 302400
     """
     half_week = 302400.0
@@ -83,12 +83,8 @@ def normalize_time(tk: float) -> float:
 
 def read_gps_rinex_nav(filename: str):
     """
-    Lee un archivo RINEX de navegación y devuelve una lista de efemérides GPS.
-
-    El diccionario generado contiene los parámetros orbitales principales:
-    - sqrtA, e, M0, Delta_n, omega, Omega0, i0, Omega_dot, IDOT
-    - Cuc, Cus, Crc, Crs, Cic, Cis
-    - toe, af0, af1, af2, etc.
+    Lee un archivo RINEX de navegación GPS.
+    Devuelve una lista de diccionarios con las efemérides.
     """
 
     path = Path(filename)
@@ -99,12 +95,16 @@ def read_gps_rinex_nav(filename: str):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         lines = f.readlines()
 
-    # Saltar cabecera
-    start_index = 0
-    for i, line in enumerate(lines):
+    # Buscar final de cabecera
+    start_index = None
+
+    for idx, line in enumerate(lines):
         if "END OF HEADER" in line:
-            start_index = i + 1
+            start_index = idx + 1
             break
+
+    if start_index is None:
+        raise ValueError("No se encontró END OF HEADER en el archivo RINEX.")
 
     ephs = []
     i = start_index
@@ -116,9 +116,9 @@ def read_gps_rinex_nav(filename: str):
             i += 1
             continue
 
-        # En RINEX 3 los satélites GPS empiezan por Gxx
         sat_id = line0[0:3].strip()
 
+        # Solo satélites GPS: G01, G02, ...
         if not sat_id.startswith("G"):
             i += 1
             continue
@@ -129,89 +129,121 @@ def read_gps_rinex_nav(filename: str):
             i += 1
             continue
 
-        # Cada bloque GPS tiene 8 líneas: línea inicial + 7 líneas
+        # Un bloque GPS tiene 8 líneas
         block = lines[i:i + 8]
 
         if len(block) < 8:
             break
 
-        # Línea 0: fecha + reloj
-        # Formato aproximado:
-        # G17 2022 12 21 14 00 00 af0 af1 af2
-        year = int(line0[4:8])
-        month = int(line0[9:11])
-        day = int(line0[12:14])
-        hour = int(line0[15:17])
-        minute = int(line0[18:20])
-        second = float(line0[21:23])
+        try:
+            # Línea 0: fecha + reloj
+            year = int(line0[4:8])
+            month = int(line0[9:11])
+            day = int(line0[12:14])
+            hour = int(line0[15:17])
+            minute = int(line0[18:20])
+            second = float(line0[21:23])
 
-        clock_values = split_rinex_values(line0[23:])
-        af0, af1, af2 = clock_values[0:3]
+            clock_values = split_rinex_values(line0[23:])
 
-        vals1 = split_rinex_values(block[1])
-        vals2 = split_rinex_values(block[2])
-        vals3 = split_rinex_values(block[3])
-        vals4 = split_rinex_values(block[4])
-        vals5 = split_rinex_values(block[5])
-        vals6 = split_rinex_values(block[6])
-        vals7 = split_rinex_values(block[7])
+            if len(clock_values) < 3:
+                raise ValueError("No se pudieron leer af0, af1, af2")
 
-        eph = {
-            "prn": prn,
+            af0, af1, af2 = clock_values[0:3]
 
-            "year": year,
-            "month": month,
-            "day": day,
-            "hour": hour,
-            "minute": minute,
-            "second": second,
+            vals1 = split_rinex_values(block[1])
+            vals2 = split_rinex_values(block[2])
+            vals3 = split_rinex_values(block[3])
+            vals4 = split_rinex_values(block[4])
+            vals5 = split_rinex_values(block[5])
+            vals6 = split_rinex_values(block[6])
+            vals7 = split_rinex_values(block[7])
 
-            "af0": af0,
-            "af1": af1,
-            "af2": af2,
+            # Comprobación mínima de seguridad
+            if (
+                len(vals1) < 4
+                or len(vals2) < 4
+                or len(vals3) < 4
+                or len(vals4) < 4
+                or len(vals5) < 3
+            ):
+                print("\nBloque RINEX mal leído:")
+                print("SAT:", sat_id)
+                for linea in block:
+                    print(linea.rstrip())
+                print("vals1:", vals1)
+                print("vals2:", vals2)
+                print("vals3:", vals3)
+                print("vals4:", vals4)
+                print("vals5:", vals5)
+                print("vals6:", vals6)
+                print("vals7:", vals7)
+                raise ValueError("No se pudieron leer correctamente las efemérides.")
 
-            # Línea 1
-            "IODE": vals1[0],
-            "Crs": vals1[1],
-            "Delta_n": vals1[2],
-            "M0": vals1[3],
+            eph = {
+                "prn": prn,
 
-            # Línea 2
-            "Cuc": vals2[0],
-            "e": vals2[1],
-            "Cus": vals2[2],
-            "sqrtA": vals2[3],
+                "year": year,
+                "month": month,
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "second": second,
 
-            # Línea 3
-            "toe": vals3[0],
-            "Cic": vals3[1],
-            "Omega0": vals3[2],
-            "Cis": vals3[3],
+                "af0": af0,
+                "af1": af1,
+                "af2": af2,
 
-            # Línea 4
-            "i0": vals4[0],
-            "Crc": vals4[1],
-            "omega": vals4[2],
-            "Omega_dot": vals4[3],
+                # Línea 1
+                "IODE": vals1[0],
+                "Crs": vals1[1],
+                "Delta_n": vals1[2],
+                "M0": vals1[3],
 
-            # Línea 5
-            "IDOT": vals5[0],
-            "codes_L2": vals5[1] if len(vals5) > 1 else None,
-            "GPS_week": vals5[2] if len(vals5) > 2 else None,
-            "L2P_flag": vals5[3] if len(vals5) > 3 else None,
+                # Línea 2
+                "Cuc": vals2[0],
+                "e": vals2[1],
+                "Cus": vals2[2],
+                "sqrtA": vals2[3],
 
-            # Línea 6
-            "SV_accuracy": vals6[0] if len(vals6) > 0 else None,
-            "SV_health": vals6[1] if len(vals6) > 1 else None,
-            "TGD": vals6[2] if len(vals6) > 2 else None,
-            "IODC": vals6[3] if len(vals6) > 3 else None,
+                # Línea 3
+                "toe": vals3[0],
+                "Cic": vals3[1],
+                "Omega0": vals3[2],
+                "Cis": vals3[3],
 
-            # Línea 7
-            "transmission_time": vals7[0] if len(vals7) > 0 else None,
-            "fit_interval": vals7[1] if len(vals7) > 1 else None,
-        }
+                # Línea 4
+                "i0": vals4[0],
+                "Crc": vals4[1],
+                "omega": vals4[2],
+                "Omega_dot": vals4[3],
 
-        ephs.append(eph)
+                # Línea 5
+                "IDOT": vals5[0],
+                "codes_L2": vals5[1] if len(vals5) > 1 else None,
+                "GPS_week": vals5[2] if len(vals5) > 2 else None,
+                "L2P_flag": vals5[3] if len(vals5) > 3 else None,
+
+                # Línea 6
+                "SV_accuracy": vals6[0] if len(vals6) > 0 else None,
+                "SV_health": vals6[1] if len(vals6) > 1 else None,
+                "TGD": vals6[2] if len(vals6) > 2 else None,
+                "IODC": vals6[3] if len(vals6) > 3 else None,
+
+                # Línea 7
+                "transmission_time": vals7[0] if len(vals7) > 0 else None,
+                "fit_interval": vals7[1] if len(vals7) > 1 else None,
+            }
+
+            ephs.append(eph)
+
+        except Exception as e:
+            print("\nError leyendo bloque RINEX:")
+            print("SAT:", sat_id)
+            for linea in block:
+                print(linea.rstrip())
+            raise e
+
         i += 8
 
     return ephs
@@ -222,6 +254,9 @@ def read_gps_rinex_nav(filename: str):
 # ============================================================
 
 def filter_prn(ephs, prn: int):
+    """
+    Filtra las efemérides de un satélite concreto.
+    """
     return [eph for eph in ephs if eph["prn"] == prn]
 
 
@@ -242,6 +277,7 @@ def select_nearest_ephemeris(ephs_prn, t: float):
 def solve_kepler(M: float, e: float, tol=1e-12, max_iter=50):
     """
     Resuelve la ecuación de Kepler:
+
         E - e sin(E) = M
 
     usando Newton-Raphson.
@@ -266,8 +302,7 @@ def compute_satellite_position(eph, t: float):
     Calcula la posición ECEF del satélite GPS en el instante t.
 
     Devuelve:
-    - x, y, z en metros
-    - diccionario con variables intermedias
+    x, y, z en metros y un diccionario con variables intermedias.
     """
 
     toe = eph["toe"]
@@ -305,7 +340,7 @@ def compute_satellite_position(eph, t: float):
     # Parámetros corregidos
     u = phik + du
     r = A * (1.0 - eph["e"] * math.cos(Ek)) + dr
-    i = eph["i0"] + eph["IDOT"] * tk + di
+    inc = eph["i0"] + eph["IDOT"] * tk + di
 
     # Coordenadas en el plano orbital
     x_orb = r * math.cos(u)
@@ -319,9 +354,9 @@ def compute_satellite_position(eph, t: float):
     )
 
     # Transformación a ECEF
-    x = x_orb * math.cos(Omega_k) - y_orb * math.cos(i) * math.sin(Omega_k)
-    y = x_orb * math.sin(Omega_k) + y_orb * math.cos(i) * math.cos(Omega_k)
-    z = y_orb * math.sin(i)
+    x = x_orb * math.cos(Omega_k) - y_orb * math.cos(inc) * math.sin(Omega_k)
+    y = x_orb * math.sin(Omega_k) + y_orb * math.cos(inc) * math.cos(Omega_k)
+    z = y_orb * math.sin(inc)
 
     debug = {
         "toe": toe,
@@ -338,7 +373,7 @@ def compute_satellite_position(eph, t: float):
         "di": di,
         "u": u,
         "r": r,
-        "i": i,
+        "i": inc,
         "x_orb": x_orb,
         "y_orb": y_orb,
         "Omega_k": Omega_k,
@@ -356,9 +391,7 @@ def ecef_to_geodetic(x: float, y: float, z: float):
     Convierte coordenadas ECEF a latitud, longitud y altura usando WGS84.
 
     Devuelve:
-    - latitud en grados
-    - longitud en grados
-    - altura en metros
+    latitud en grados, longitud en grados y altura en metros.
     """
 
     lon = math.atan2(y, x)
@@ -487,6 +520,9 @@ def main():
     # 2. Filtrar PRN objetivo
     ephs_prn = filter_prn(ephs, PRN_OBJETIVO)
 
+    print(f"Número total de efemérides GPS leídas: {len(ephs)}")
+    print(f"Número de efemérides encontradas para G{PRN_OBJETIVO:02d}: {len(ephs_prn)}")
+
     if not ephs_prn:
         raise ValueError(f"No se encontraron efemérides para PRN{PRN_OBJETIVO:02d}")
 
@@ -495,6 +531,7 @@ def main():
 
     # 4. Resultado para el instante objetivo
     eph_main = select_nearest_ephemeris(ephs_prn, T_OBJETIVO)
+
     x, y, z, debug = compute_satellite_position(eph_main, T_OBJETIVO)
     lat, lon, h = ecef_to_geodetic(x, y, z)
 
@@ -508,8 +545,10 @@ def main():
     rows = []
 
     t = t_start
+
     while t <= t_end + 1e-9:
         eph = select_nearest_ephemeris(ephs_prn, t)
+
         x, y, z, dbg = compute_satellite_position(eph, t)
         lat, lon, h = ecef_to_geodetic(x, y, z)
 
@@ -557,7 +596,8 @@ def main():
         )
 
     print("-" * 120)
-    print(f"\nArchivo generado: {OUTPUT_SV}")
+    print()
+    print(f"Archivo generado: {OUTPUT_SV}")
     print(f"Archivo generado: {OUTPUT_CSV}")
 
 
