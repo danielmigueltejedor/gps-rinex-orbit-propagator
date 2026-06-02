@@ -53,19 +53,11 @@ SV_COLUMNS = [
 # ============================================================
 
 def nums(line):
-    """
-    Saca todos los números de una línea RINEX.
-    Lo hago con regex porque RINEX a veces usa D en vez de E.
-    """
     pattern = r"[-+]?\d+\.\d+(?:[DEde][-+]?\d+)?|[-+]?\d+(?:[DEde][-+]?\d+)?"
     return [float(x.replace("D", "E").replace("d", "E")) for x in re.findall(pattern, line)]
 
 
 def read_rinex_nav(path):
-    """
-    Lee el fichero RINEX de navegación.
-    Devuelve una lista de diccionarios, uno por cada bloque de efemérides GPS.
-    """
     lines = Path(path).read_text(errors="ignore").splitlines()
 
     start = next(i for i, line in enumerate(lines) if "END OF HEADER" in line) + 1
@@ -88,10 +80,6 @@ def read_rinex_nav(path):
         prn = int(line0[1:3])
         clock = nums(line0[23:])
         rows = [nums(line) for line in block[1:]]
-
-        # Control básico para detectar si una línea se ha leído mal.
-        if len(clock) < 3 or any(len(row) < 4 for row in rows[:4]) or len(rows[4]) < 3:
-            raise ValueError(f"Bloque RINEX mal leído para {line0[:3]}:\n" + "\n".join(block))
 
         ephs.append({
             "prn": prn,
@@ -143,10 +131,6 @@ def read_rinex_nav(path):
 
 
 def write_sv_txt(ephs, filename):
-    """
-    Genera SV_PRNnum.txt en formato tabla.
-    Esto cumple el punto (1) del enunciado.
-    """
     with open(filename, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SV_COLUMNS, delimiter="\t")
         writer.writeheader()
@@ -156,10 +140,6 @@ def write_sv_txt(ephs, filename):
 
 
 def read_sv_txt(filename):
-    """
-    Lee el SV_PRNnum.txt generado.
-    Lo convierto otra vez a lista de diccionarios para usarlo en el algoritmo.
-    """
     ephs = []
 
     with open(filename, "r", encoding="utf-8") as f:
@@ -179,10 +159,6 @@ def read_sv_txt(filename):
 # ============================================================
 
 def gps_time_diff(t, toe):
-    """
-    Calcula tk = t - toe.
-    Se corrige por cambio de semana GPS si hiciese falta.
-    """
     tk = t - toe
 
     if tk > 302400:
@@ -194,18 +170,10 @@ def gps_time_diff(t, toe):
 
 
 def nearest_eph(ephs, t):
-    """
-    Selecciona la efeméride cuyo toe minimiza |t - toe|.
-    """
     return min(ephs, key=lambda eph: abs(gps_time_diff(t, eph["toe"])))
 
 
 def select_from_sv_file(filename, t):
-    """
-    Función independiente pedida en el punto (2).
-    Entrada: SV_PRNnum.txt y tiempo GPS t.
-    Salida: toe elegido, fila de efemérides y tk.
-    """
     ephs = read_sv_txt(filename)
     eph = nearest_eph(ephs, t)
     tk = gps_time_diff(t, eph["toe"])
@@ -218,10 +186,6 @@ def select_from_sv_file(filename, t):
 # ============================================================
 
 def kepler(M, e, tol=1e-12, max_iter=50):
-    """
-    Resuelve E - e sin(E) = M con Newton-Raphson.
-    Esta función es independiente, como pide el enunciado.
-    """
     E = M
 
     for _ in range(max_iter):
@@ -238,10 +202,6 @@ def kepler(M, e, tol=1e-12, max_iter=50):
 
 
 def validate_kepler():
-    """
-    Validación simple de Kepler.
-    Si el residual sale casi cero, la solución está bien.
-    """
     M = 1.0
     e = 0.01
     E = kepler(M, e)
@@ -260,10 +220,6 @@ def validate_kepler():
 # ============================================================
 
 def satpos(eph, t):
-    """
-    Calcula la posición ECEF del satélite usando las ecuaciones
-    de efemérides radiodifundidas del GPS.
-    """
     tk = gps_time_diff(t, eph["toe"])
 
     # Semieje mayor y movimiento medio
@@ -314,10 +270,6 @@ def satpos(eph, t):
 # ============================================================
 
 def ecef_to_geodetic(x, y, z, tol=1e-14, max_iter=10):
-    """
-    Convierte coordenadas ECEF a latitud, longitud y altura WGS84.
-    Función independiente pedida en el punto (5).
-    """
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
 
@@ -343,10 +295,6 @@ def ecef_to_geodetic(x, y, z, tol=1e-14, max_iter=10):
 
 
 def validate_geodetic():
-    """
-    Validación simple de ECEF -> geodésicas.
-    En Greenwich y ecuador: x=a, y=0, z=0 -> lat=0, lon=0, h=0.
-    """
     lat, lon, h = ecef_to_geodetic(A_WGS84, 0.0, 0.0)
 
     print("\nVALIDACIÓN ECEF -> GEODÉSICAS")
@@ -360,9 +308,6 @@ def validate_geodetic():
 # ============================================================
 
 def compute_interval(ephs, t0, hours, dt):
-    """
-    Calcula la posición cada dt segundos en un intervalo centrado en t0.
-    """
     rows = []
 
     t = t0 - hours * 3600 / 2
@@ -392,9 +337,6 @@ def compute_interval(ephs, t0, hours, dt):
 
 
 def write_results_csv(rows, filename):
-    """
-    Guarda la tabla de resultados del intervalo.
-    """
     with open(filename, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
         writer.writeheader()
@@ -402,10 +344,6 @@ def write_results_csv(rows, filename):
 
 
 def plot_ground_track(rows, filename):
-    """
-    Dibuja una ground track sencilla en proyección lon-lat.
-    No meto mapa de continentes para mantener el código contenido.
-    """
     lons = [row["lon_deg"] for row in rows]
     lats = [row["lat_deg"] for row in rows]
 
