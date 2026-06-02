@@ -3,51 +3,81 @@ import re
 import csv
 from pathlib import Path
 
-# =========================
-# Configuración
-# =========================
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# Datos del grupo
+# Último dígito suma DNI = 0 -> G17, t = 311400 s
+# ============================================================
 
 RINEX_FILE = "Modified_RINEX_I2.rnx"
+
 PRN = 17
-T0 = 311400.0          # tiempo GPS objetivo [s]
-DT = 1800.0            # paso 30 min [s]
-HOURS = 8              # intervalo total centrado en T0
+T0 = 311400.0          # tiempo GPS pedido [s]
+DT = 1800.0            # paso de 30 min [s]
+HOURS = 8              # intervalo total para la traza
 
-OUT_TXT = "SV_PRN17.txt"
+OUT_SV = "SV_PRN17.txt"
 OUT_CSV = "PRN17_resultados.csv"
+OUT_PNG = "PRN17_ground_track.png"
 
-# Constantes GPS
-MU = 3.986005e14
-OMEGA_E = 7.2921151467e-5
 
-# WGS84
+# ============================================================
+# Constantes
+# ============================================================
+
+MU = 3.986005e14              # constante gravitacional GPS [m^3/s^2]
+OMEGA_E = 7.2921151467e-5     # velocidad angular Tierra [rad/s]
+
+# Elipsoide WGS84
 A_WGS84 = 6378137.0
 F_WGS84 = 1 / 298.257223563
 E2_WGS84 = F_WGS84 * (2 - F_WGS84)
 
 
-# =========================
-# Lectura RINEX
-# =========================
+# Columnas que pide el enunciado para el fichero SV_PRNnum.txt.
+# Las dos primeras son week y toe.
+SV_COLUMNS = [
+    "week", "toe",
+    "sqrtA", "e", "M0", "dn", "omega",
+    "Omega0", "i0", "Omegadot", "IDOT",
+    "Cuc", "Cus", "Crc", "Crs", "Cic", "Cis",
+    "af0", "af1", "af2",
+    "IODE", "IODC", "TGD", "SV_health", "SV_accuracy"
+]
+
+
+# ============================================================
+# Lectura del RINEX
+# ============================================================
 
 def nums(line):
-    """Extrae números de una línea RINEX, aceptando exponentes D o E."""
+    """
+    Saca todos los números de una línea RINEX.
+    Lo hago con regex porque RINEX a veces usa D en vez de E.
+    """
     pattern = r"[-+]?\d+\.\d+(?:[DEde][-+]?\d+)?|[-+]?\d+(?:[DEde][-+]?\d+)?"
     return [float(x.replace("D", "E").replace("d", "E")) for x in re.findall(pattern, line)]
 
 
 def read_rinex_nav(path):
-    """Lee un RINEX de navegación y devuelve efemérides GPS."""
+    """
+    Lee el fichero RINEX de navegación.
+    Devuelve una lista de diccionarios, uno por cada bloque de efemérides GPS.
+    """
     lines = Path(path).read_text(errors="ignore").splitlines()
 
-    start = next(i for i, l in enumerate(lines) if "END OF HEADER" in l) + 1
+    start = next(i for i, line in enumerate(lines) if "END OF HEADER" in line) + 1
+
     ephs = []
     i = start
 
     while i < len(lines):
-        l0 = lines[i]
+        line0 = lines[i]
 
-        if not l0.strip() or not l0.startswith("G"):
+        # Me quedo solo con satélites GPS: G01, G02, ...
+        if not line0.strip() or not line0.startswith("G"):
             i += 1
             continue
 
@@ -55,47 +85,56 @@ def read_rinex_nav(path):
         if len(block) < 8:
             break
 
-        prn = int(l0[1:3])
-        clk = nums(l0[23:])
-        v = [nums(b) for b in block[1:]]
+        prn = int(line0[1:3])
+        clock = nums(line0[23:])
+        rows = [nums(line) for line in block[1:]]
 
-        if len(clk) < 3 or any(len(row) < 4 for row in v[:4]) or len(v[4]) < 3:
-            raise ValueError(f"Bloque RINEX mal leído para {l0[:3]}:\n" + "\n".join(block))
+        # Control básico para detectar si una línea se ha leído mal.
+        if len(clock) < 3 or any(len(row) < 4 for row in rows[:4]) or len(rows[4]) < 3:
+            raise ValueError(f"Bloque RINEX mal leído para {line0[:3]}:\n" + "\n".join(block))
 
         ephs.append({
             "prn": prn,
-            "epoch": l0[4:23].strip(),
-            "af0": clk[0],
-            "af1": clk[1],
-            "af2": clk[2],
+            "epoch": line0[4:23].strip(),
 
-            "IODE": v[0][0],
-            "Crs": v[0][1],
-            "dn": v[0][2],
-            "M0": v[0][3],
+            # Parámetros de reloj
+            "af0": clock[0],
+            "af1": clock[1],
+            "af2": clock[2],
 
-            "Cuc": v[1][0],
-            "e": v[1][1],
-            "Cus": v[1][2],
-            "sqrtA": v[1][3],
+            # Línea 1 del bloque
+            "IODE": rows[0][0],
+            "Crs": rows[0][1],
+            "dn": rows[0][2],
+            "M0": rows[0][3],
 
-            "toe": v[2][0],
-            "Cic": v[2][1],
-            "Omega0": v[2][2],
-            "Cis": v[2][3],
+            # Línea 2
+            "Cuc": rows[1][0],
+            "e": rows[1][1],
+            "Cus": rows[1][2],
+            "sqrtA": rows[1][3],
 
-            "i0": v[3][0],
-            "Crc": v[3][1],
-            "omega": v[3][2],
-            "Omegadot": v[3][3],
+            # Línea 3
+            "toe": rows[2][0],
+            "Cic": rows[2][1],
+            "Omega0": rows[2][2],
+            "Cis": rows[2][3],
 
-            "IDOT": v[4][0],
-            "week": v[4][2],
+            # Línea 4
+            "i0": rows[3][0],
+            "Crc": rows[3][1],
+            "omega": rows[3][2],
+            "Omegadot": rows[3][3],
 
-            "SV_accuracy": v[5][0] if len(v[5]) > 0 else None,
-            "SV_health": v[5][1] if len(v[5]) > 1 else None,
-            "TGD": v[5][2] if len(v[5]) > 2 else None,
-            "IODC": v[5][3] if len(v[5]) > 3 else None,
+            # Línea 5
+            "IDOT": rows[4][0],
+            "week": rows[4][2],
+
+            # Línea 6
+            "SV_accuracy": rows[5][0] if len(rows[5]) > 0 else "",
+            "SV_health": rows[5][1] if len(rows[5]) > 1 else "",
+            "TGD": rows[5][2] if len(rows[5]) > 2 else "",
+            "IODC": rows[5][3] if len(rows[5]) > 3 else "",
         })
 
         i += 8
@@ -103,67 +142,166 @@ def read_rinex_nav(path):
     return ephs
 
 
-# =========================
-# Algoritmo GPS
-# =========================
+def write_sv_txt(ephs, filename):
+    """
+    Genera SV_PRNnum.txt en formato tabla.
+    Esto cumple el punto (1) del enunciado.
+    """
+    with open(filename, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SV_COLUMNS, delimiter="\t")
+        writer.writeheader()
+
+        for eph in ephs:
+            writer.writerow({col: eph.get(col, "") for col in SV_COLUMNS})
+
+
+def read_sv_txt(filename):
+    """
+    Lee el SV_PRNnum.txt generado.
+    Lo convierto otra vez a lista de diccionarios para usarlo en el algoritmo.
+    """
+    ephs = []
+
+    with open(filename, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+
+        for row in reader:
+            eph = {}
+            for key, value in row.items():
+                eph[key] = None if value == "" else float(value)
+            ephs.append(eph)
+
+    return ephs
+
+
+# ============================================================
+# Selección de efemérides
+# ============================================================
 
 def gps_time_diff(t, toe):
-    """Diferencia temporal ajustada a media semana GPS."""
+    """
+    Calcula tk = t - toe.
+    Se corrige por cambio de semana GPS si hiciese falta.
+    """
     tk = t - toe
+
     if tk > 302400:
         tk -= 604800
-    if tk < -302400:
+    elif tk < -302400:
         tk += 604800
+
     return tk
 
 
 def nearest_eph(ephs, t):
-    """Selecciona la efeméride con toe más cercano al tiempo t."""
-    return min(ephs, key=lambda e: abs(gps_time_diff(t, e["toe"])))
+    """
+    Selecciona la efeméride cuyo toe minimiza |t - toe|.
+    """
+    return min(ephs, key=lambda eph: abs(gps_time_diff(t, eph["toe"])))
 
 
-def kepler(M, e, tol=1e-12):
-    """Resuelve E - e sin(E) = M por Newton-Raphson."""
+def select_from_sv_file(filename, t):
+    """
+    Función independiente pedida en el punto (2).
+    Entrada: SV_PRNnum.txt y tiempo GPS t.
+    Salida: toe elegido, fila de efemérides y tk.
+    """
+    ephs = read_sv_txt(filename)
+    eph = nearest_eph(ephs, t)
+    tk = gps_time_diff(t, eph["toe"])
+
+    return eph["toe"], eph, tk
+
+
+# ============================================================
+# Kepler
+# ============================================================
+
+def kepler(M, e, tol=1e-12, max_iter=50):
+    """
+    Resuelve E - e sin(E) = M con Newton-Raphson.
+    Esta función es independiente, como pide el enunciado.
+    """
     E = M
-    for _ in range(50):
-        dE = -(E - e * math.sin(E) - M) / (1 - e * math.cos(E))
+
+    for _ in range(max_iter):
+        f = E - e * math.sin(E) - M
+        fp = 1 - e * math.cos(E)
+
+        dE = -f / fp
         E += dE
+
         if abs(dE) < tol:
             break
+
     return E
 
 
+def validate_kepler():
+    """
+    Validación simple de Kepler.
+    Si el residual sale casi cero, la solución está bien.
+    """
+    M = 1.0
+    e = 0.01
+    E = kepler(M, e)
+
+    residual = E - e * math.sin(E) - M
+
+    print("\nVALIDACIÓN KEPLER")
+    print(f"M = {M}")
+    print(f"e = {e}")
+    print(f"E = {E:.12f}")
+    print(f"residual = {residual:.3e}")
+
+
+# ============================================================
+# Algoritmo GPS: efemérides -> ECEF
+# ============================================================
+
 def satpos(eph, t):
-    """Calcula posición ECEF del satélite a partir de efemérides GPS."""
+    """
+    Calcula la posición ECEF del satélite usando las ecuaciones
+    de efemérides radiodifundidas del GPS.
+    """
     tk = gps_time_diff(t, eph["toe"])
 
+    # Semieje mayor y movimiento medio
     A = eph["sqrtA"] ** 2
     n0 = math.sqrt(MU / A**3)
     n = n0 + eph["dn"]
 
+    # Anomalía media y anomalía excéntrica
     M = eph["M0"] + n * tk
     E = kepler(M, eph["e"])
 
+    # Anomalía verdadera
     nu = math.atan2(
         math.sqrt(1 - eph["e"]**2) * math.sin(E),
         math.cos(E) - eph["e"]
     )
 
+    # Argumento de latitud sin corregir
     phi = nu + eph["omega"]
 
+    # Correcciones armónicas
     du = eph["Cuc"] * math.cos(2 * phi) + eph["Cus"] * math.sin(2 * phi)
     dr = eph["Crc"] * math.cos(2 * phi) + eph["Crs"] * math.sin(2 * phi)
     di = eph["Cic"] * math.cos(2 * phi) + eph["Cis"] * math.sin(2 * phi)
 
+    # Argumento de latitud, radio e inclinación corregidos
     u = phi + du
     r = A * (1 - eph["e"] * math.cos(E)) + dr
     inc = eph["i0"] + eph["IDOT"] * tk + di
 
+    # Posición en el plano orbital
     xp = r * math.cos(u)
     yp = r * math.sin(u)
 
+    # Longitud corregida del nodo ascendente
     Omega = eph["Omega0"] + (eph["Omegadot"] - OMEGA_E) * tk - OMEGA_E * eph["toe"]
 
+    # Transformación final a ECEF
     x = xp * math.cos(Omega) - yp * math.cos(inc) * math.sin(Omega)
     y = xp * math.sin(Omega) + yp * math.cos(inc) * math.cos(Omega)
     z = yp * math.sin(inc)
@@ -171,19 +309,31 @@ def satpos(eph, t):
     return x, y, z, tk
 
 
-def ecef_to_geodetic(x, y, z):
-    """Conversión aproximada ECEF -> latitud, longitud y altura WGS84."""
+# ============================================================
+# ECEF -> geodésicas WGS84
+# ============================================================
+
+def ecef_to_geodetic(x, y, z, tol=1e-14, max_iter=10):
+    """
+    Convierte coordenadas ECEF a latitud, longitud y altura WGS84.
+    Función independiente pedida en el punto (5).
+    """
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
+
+    # Estimación inicial de latitud
     lat = math.atan2(z, p * (1 - E2_WGS84))
 
-    for _ in range(10):
+    for _ in range(max_iter):
         N = A_WGS84 / math.sqrt(1 - E2_WGS84 * math.sin(lat) ** 2)
         h = p / math.cos(lat) - N
+
         lat_new = math.atan2(z, p * (1 - E2_WGS84 * N / (N + h)))
-        if abs(lat_new - lat) < 1e-14:
+
+        if abs(lat_new - lat) < tol:
             lat = lat_new
             break
+
         lat = lat_new
 
     N = A_WGS84 / math.sqrt(1 - E2_WGS84 * math.sin(lat) ** 2)
@@ -192,56 +342,41 @@ def ecef_to_geodetic(x, y, z):
     return math.degrees(lat), math.degrees(lon), h
 
 
-# =========================
-# Programa principal
-# =========================
+def validate_geodetic():
+    """
+    Validación simple de ECEF -> geodésicas.
+    En Greenwich y ecuador: x=a, y=0, z=0 -> lat=0, lon=0, h=0.
+    """
+    lat, lon, h = ecef_to_geodetic(A_WGS84, 0.0, 0.0)
 
-def main():
-    ephs_all = read_rinex_nav(RINEX_FILE)
-    ephs = [e for e in ephs_all if e["prn"] == PRN]
+    print("\nVALIDACIÓN ECEF -> GEODÉSICAS")
+    print(f"lat = {lat:.12f} deg")
+    print(f"lon = {lon:.12f} deg")
+    print(f"h = {h:.6f} m")
 
-    if not ephs:
-        raise ValueError(f"No hay efemérides para G{PRN:02d}")
 
-    print(f"Efemérides encontradas para G{PRN:02d}: {len(ephs)}")
+# ============================================================
+# Resultados y traza
+# ============================================================
 
-    # Guardar efemérides extraídas
-    with open(OUT_TXT, "w", encoding="utf-8") as f:
-        for e in ephs:
-            f.write(f"G{PRN:02d} epoch={e['epoch']} toe={e['toe']} week={e['week']}\n")
-            f.write(str(e) + "\n\n")
-
-    # Resultado principal
-    eph0 = nearest_eph(ephs, T0)
-    x, y, z, tk = satpos(eph0, T0)
-    lat, lon, h = ecef_to_geodetic(x, y, z)
-
-    print("\nRESULTADO PRINCIPAL")
-    print(f"PRN: G{PRN:02d}")
-    print(f"t = {T0:.0f} s")
-    print(f"toe = {eph0['toe']:.0f} s")
-    print(f"tk = {tk:.0f} s")
-    print(f"x = {x:.3f} m")
-    print(f"y = {y:.3f} m")
-    print(f"z = {z:.3f} m")
-    print(f"lat = {lat:.6f}º")
-    print(f"lon = {lon:.6f}º")
-    print(f"h = {h:.3f} m")
-
-    # Tabla de 8 h centrada en T0
+def compute_interval(ephs, t0, hours, dt):
+    """
+    Calcula la posición cada dt segundos en un intervalo centrado en t0.
+    """
     rows = []
-    t_ini = T0 - HOURS * 3600 / 2
-    t_fin = T0 + HOURS * 3600 / 2
 
-    t = t_ini
-    while t <= t_fin:
-        e = nearest_eph(ephs, t)
-        x, y, z, tk = satpos(e, t)
+    t = t0 - hours * 3600 / 2
+    t_end = t0 + hours * 3600 / 2
+
+    while t <= t_end + 1e-9:
+        eph = nearest_eph(ephs, t)
+
+        x, y, z, tk = satpos(eph, t)
         lat, lon, h = ecef_to_geodetic(x, y, z)
 
         rows.append({
             "t_GPS_s": round(t, 3),
-            "toe_s": round(e["toe"], 3),
+            "toe_s": round(eph["toe"], 3),
             "tk_s": round(tk, 3),
             "x_ECEF_m": round(x, 3),
             "y_ECEF_m": round(y, 3),
@@ -251,16 +386,96 @@ def main():
             "h_m": round(h, 3),
         })
 
-        t += DT
+        t += dt
 
-    with open(OUT_CSV, "w", newline="", encoding="utf-8") as f:
+    return rows
+
+
+def write_results_csv(rows, filename):
+    """
+    Guarda la tabla de resultados del intervalo.
+    """
+    with open(filename, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\nArchivos generados:")
-    print(f"- {OUT_TXT}")
+
+def plot_ground_track(rows, filename):
+    """
+    Dibuja una ground track sencilla en proyección lon-lat.
+    No meto mapa de continentes para mantener el código contenido.
+    """
+    lons = [row["lon_deg"] for row in rows]
+    lats = [row["lat_deg"] for row in rows]
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(lons, lats, marker="o")
+    plt.scatter([lons[len(lons)//2]], [lats[len(lats)//2]], marker="x", s=80)
+
+    plt.title(f"Ground track G{PRN:02d} - intervalo de {HOURS} h")
+    plt.xlabel("Longitud [deg]")
+    plt.ylabel("Latitud [deg]")
+
+    plt.xlim(-180, 180)
+    plt.ylim(-90, 90)
+    plt.grid(True)
+
+    plt.savefig(filename, dpi=200, bbox_inches="tight")
+    plt.close()
+
+
+# ============================================================
+# Programa principal
+# ============================================================
+
+def main():
+    # 1) Leo RINEX y filtro mi satélite
+    ephs_all = read_rinex_nav(RINEX_FILE)
+    ephs_prn = [eph for eph in ephs_all if eph["prn"] == PRN]
+
+    if not ephs_prn:
+        raise ValueError(f"No hay efemérides para G{PRN:02d}")
+
+    print(f"Efemérides encontradas para G{PRN:02d}: {len(ephs_prn)}")
+
+    # 2) Genero SV_PRN17.txt como tabla
+    write_sv_txt(ephs_prn, OUT_SV)
+
+    # 3) Uso el propio fichero SV_PRN17.txt para seleccionar la efeméride
+    toe, eph0, tk = select_from_sv_file(OUT_SV, T0)
+
+    # 4) Calculo posición principal
+    x, y, z, tk = satpos(eph0, T0)
+    lat, lon, h = ecef_to_geodetic(x, y, z)
+
+    print("\nRESULTADO PRINCIPAL")
+    print(f"PRN = G{PRN:02d}")
+    print(f"t = {T0:.0f} s")
+    print(f"toe = {toe:.0f} s")
+    print(f"tk = {tk:.0f} s")
+    print(f"x = {x:.3f} m")
+    print(f"y = {y:.3f} m")
+    print(f"z = {z:.3f} m")
+    print(f"lat = {lat:.6f} deg")
+    print(f"lon = {lon:.6f} deg")
+    print(f"h = {h:.3f} m")
+
+    # 5) Validaciones pedidas
+    validate_kepler()
+    validate_geodetic()
+
+    # 6) Tabla y ground track de 8 horas
+    ephs_from_file = read_sv_txt(OUT_SV)
+    rows = compute_interval(ephs_from_file, T0, HOURS, DT)
+
+    write_results_csv(rows, OUT_CSV)
+    plot_ground_track(rows, OUT_PNG)
+
+    print("\nArchivos generados:")
+    print(f"- {OUT_SV}")
     print(f"- {OUT_CSV}")
+    print(f"- {OUT_PNG}")
 
 
 if __name__ == "__main__":
